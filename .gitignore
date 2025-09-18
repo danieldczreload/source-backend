@@ -1,0 +1,27 @@
+# Build
+bin/
+obj/
+
+# IDEs
+.vs/
+.idea/
+*.suo
+*.user
+*.csproj.user
+
+# Rider
+*.iml
+.gradle/
+out/
+
+# Secrets & keys
+**/secrets.json
+**/appsettings.*.local.json
+*.pem
+*.pfx
+*.key
+*.cer
+
+# Logs
+logs/
+*.log

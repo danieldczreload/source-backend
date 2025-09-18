@@ -1,0 +1,6 @@
+@SourceBackend.Web_HostAddress = http://localhost:5262
+
+GET {{SourceBackend.Web_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
