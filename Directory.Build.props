@@ -1,0 +1,9 @@
+<Project>
+  <!-- Exclude documentation files from build -->
+  <ItemGroup>
+    <None Include="**\*.md" />
+    <Compile Remove="**\*.md" />
+    <EmbeddedResource Remove="**\*.md" />
+  </ItemGroup>
+</Project>
+

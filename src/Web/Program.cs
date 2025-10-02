@@ -2,6 +2,8 @@ using Serilog;
 using SourceBackend.Web.Auth;
 using SourceBackend.Core.Abstractions;
 using SourceBackend.Web.Extensions;
+using SourceBackend.Infrastructure.Data;
+using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -17,6 +19,12 @@ builder.Services.AddSwaggerGen(c =>
 
 
 builder.Services.AddPluggableJwt(builder.Configuration);
+
+// Database
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseSqlServer(
+        builder.Configuration.GetConnectionString("DefaultConnection"),
+        sqlOptions => sqlOptions.EnableRetryOnFailure()));
 
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ICurrentUser, CurrentUserFromHttpContext>();
