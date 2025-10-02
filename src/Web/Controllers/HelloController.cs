@@ -10,7 +10,6 @@ namespace SourceBackend.Web.Controllers;
 [AllowAnonymous]
 public sealed class HelloController : ControllerBase
 {
-    // GET /hello?name=Daniel  -> Query
     [HttpGet]
     public async Task<ActionResult<GetHello.Result>> Get(
         [FromServices] GetHello.Handler handler,

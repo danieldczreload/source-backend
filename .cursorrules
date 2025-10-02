@@ -1,0 +1,305 @@
+# Cursor Rules — SourceBackend (.NET 8, Controllers + CQRS Light + Pluggable JWT + RBAC)
+
+> **Goal:** Make Cursor generate code that strictly follows this project's architecture and conventions.  
+> **Stack:** .NET 8, ASP.NET Core, Controllers, CQRS light, pluggable JWT auth, role-based authorization (RBAC).  
+> **Projects:** `SourceBackend.Web` (HTTP host), `SourceBackend.Core` (business), `SourceBackend.Infrastructure` (adapters).  
+> **Dependencies:** `Web → Core`, `Infrastructure → Core`. _Do not add `Web → Infrastructure` unless explicitly requested._
+
+---
+
+## 0) Non-Negotiable Essence
+- Controllers are **thin**: parse/validate DTOs → call **Core** handler → return DTO/Result.
+- Core owns **use cases**: one file per action with `Request/Result/Handler` (CQRS light).
+- Auth is **pluggable JWT** (LocalSymmetric / LocalAsymmetric / OIDC). Authorization is **RBAC** with `[Authorize(Roles="...")]`.
+- Prefer **explicit code**: manual mapping, constructor DI, `TimeProvider` (testable time).
+- **No MediatR / AutoMapper** unless explicitly asked.
+
+---
+
+## 1) Solution Layout & Boundaries (MUST)
+- **Folders / Projects**
+  - `src/Web/SourceBackend.Web` → HTTP host, Controllers, Auth setup, Swagger, DI, Serilog, Program.cs.
+  - `src/Core/SourceBackend.Core` → use cases (CQRS light), domain logic, abstractions/ports.
+  - `src/Infrastructure/SourceBackend.Infrastructure` → persistence & external adapters (only when needed).
+- **References**
+  - `Web` **references** `Core`.  
+  - `Infrastructure` **references** `Core`.  
+  - `Web` **does not** reference `Infrastructure` (initially).
+- **No domain logic** in Web/Infrastructure.
+
+---
+
+## 2) Controllers (MUST)
+- Location: `src/Web/Controllers/*`.
+- Attributes: `[ApiController]`, `[Route("...")]`, optionally `[Authorize]` or `[AllowAnonymous]`.
+- **Thin**: accept DTOs (DataAnnotations), call a Core handler via `[FromServices]`, return `ActionResult<T>`.
+- **Never** expose domain entities; return **Result/DTO** records.
+- Annotate RBAC where required:
+  ```csharp
+  [Authorize(Roles = "Admin,Manager")]
+  public async Task<ActionResult<...>> Action(...) { ... }
+  ```
+
+---
+
+## 3) CQRS Light in Core (MUST)
+- Structure per action (one file):
+  ```
+  src/Core/Features/<Feature>/Queries/<Action>.cs
+  src/Core/Features/<Feature>/Commands/<Action>.cs
+  ```
+- File pattern:
+  ```csharp
+  namespace SourceBackend.Core.Features.<Feature>.<Kind>;
+
+  public static class <Action>
+  {
+      public sealed record QueryOrCommand(...);
+      public sealed record Result(...);
+
+      public sealed class Handler(/* deps via ctor: TimeProvider, ICurrentUser, ports... */)
+      {
+          public Task<Result> Handle(QueryOrCommand m, CancellationToken ct = default)
+          {
+              // business logic only (no HttpContext here)
+          }
+      }
+  }
+  ```
+- Handlers: immutable, dependencies via **constructor**. Always accept **CancellationToken**.
+- Prefer `DateTimeOffset` or **`TimeProvider`** over `DateTime.Now/UtcNow`.
+
+---
+
+## 4) Dependency Injection (MUST)
+- **Clock**:
+  ```csharp
+  builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+  ```
+- **Handlers** (explicit, recommended):
+  ```csharp
+  builder.Services.AddScoped<SourceBackend.Core.Features.Foo.Queries.GetFoo.Handler>();
+  builder.Services.AddScoped<SourceBackend.Core.Features.Foo.Commands.CreateFoo.Handler>();
+  ```
+- **Optional assembly scanning**: if used, filter namespaces `*.Features.*`, catch `ReflectionTypeLoadException`, and register **AsSelf** with **Scoped** lifetime only for successfully loaded types.
+- Controllers inject **concrete** handler types with `[FromServices]`.
+
+---
+
+## 5) Authentication & Authorization (MUST)
+- **Pluggable JWT** (`Auth:Mode`):  
+  - `LocalSymmetric` (HS256): `Auth:LocalSymmetric:Base64Key` (≥32 bytes; store in user-secrets or vault).  
+  - `LocalAsymmetric` (RS256): public PEM validates; private PEM can sign dev tokens for `/auth/login`.  
+  - `Oidc` (IdP): `Authority` + `Audience` (+ optional strict `Issuer`). API **validates** tokens; **does not** issue them.
+- **RBAC** via roles with `[Authorize(Roles="...")]`.
+- **Role claim** name is configurable: `Auth:RoleClaimType` (default `"roles"`).
+- Auth setup lives in `src/Web/Auth/AuthSetupExtensions.cs`.  
+  **Do not** add ASP.NET Identity or DB-backed auth without explicit request.
+
+---
+
+## 6) ICurrentUser & HttpContext (MUST)
+- Core must **not** depend on `HttpContext`.
+- Expose identity in Core via an abstraction `ICurrentUser` (e.g., `UserId` and `Roles`).
+- Implementation in Web reads claims from `HttpContext.User`, honoring `Auth:RoleClaimType`.
+
+---
+
+## 7) Swagger (MUST)
+- Enabled **only** in Development.
+- Avoid nested-type schema collisions (e.g., multiple `Result`). Configure:
+  ```csharp
+  builder.Services.AddSwaggerGen(c =>
+  {
+      c.CustomSchemaIds(t => (t.FullName ?? t.Name).Replace("+", "."));
+  });
+  ```
+- UI mapping:
+  ```csharp
+  if (app.Environment.IsDevelopment())
+  {
+      app.UseSwagger();
+      app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "SourceBackend v1"));
+  }
+  ```
+
+---
+
+## 8) DTOs & Validation (SHOULD)
+- Use **records** for request/response DTOs.
+- Prefer **DataAnnotations** first (`[Required]`, `[EmailAddress]`, `[Range]`, etc.).
+- Introduce FluentValidation **only** when necessary.
+- Keep DTOs in Web unless shared within the same feature.
+
+---
+
+## 9) Error Shape (SHOULD)
+- Standard error payload (example):
+  ```json
+  { "error": "message", "code": "optional", "traceId": "optional" }
+  ```
+- Map validation issues to `ValidationProblemDetails` when appropriate.
+
+---
+
+## 10) Time & Date (MUST)
+- Use **`TimeProvider`** (testable) or `DateTimeOffset`.
+- Register `TimeProvider.System` and inject it where time matters.
+- Do **not** use `DateTime.Now/DateTime.UtcNow` directly in Core logic.
+
+---
+
+## 11) Logging (SHOULD)
+- Use **Serilog** with:
+  - `ReadFrom.Configuration`, `Enrich.FromLogContext()`, `WriteTo.Console()`
+  - `app.UseSerilogRequestLogging()`
+- **Never** log tokens, secrets, or PII.
+- Logging claims like `sub/iss/aud/jti` is acceptable; **do not** log full tokens.
+
+---
+
+## 12) Infrastructure (SHOULD)
+- Implement adapters for DB/queues/email/files **only when needed**.
+- Implement Core ports/interfaces in Infrastructure. Keep Core isolated from EF/SDK types.
+- Reads: project to DTOs via LINQ + `AsNoTracking()` (when EF is added).
+- Writes: one transaction per use case; consider optimistic concurrency (RowVersion) when applicable.
+
+---
+
+## 13) Security & Secrets (MUST)
+- **Never** commit secrets/PEMs/PFX. Ignore in `.gitignore` and use user-secrets or a vault.
+- Reasonable defaults: token lifetime ~**1 hour**, `ClockSkew` ~**2 minutes**, all times in **UTC**.
+- In `Oidc` mode, `/auth/login` should be disabled or return a clear "not supported" response.
+
+---
+
+## 14) Naming & Style (SHOULD)
+- **PascalCase**: classes, records, methods.  
+- **camelCase**: parameters, locals.  
+- **Interfaces** start with `I` (e.g., `ICurrentUser`).  
+- **Namespaces**: `SourceBackend.Web|Core|Infrastructure`.  
+- **Files** named after the main public type.  
+- In Core slices: concise nested types — `<Action>.Query`, `<Action>.Result`, `<Action>.Handler`.
+
+---
+
+## 15) Coding Practices (MUST)
+- **SOLID, KISS, YAGNI** — minimal ceremony.
+- Immutability where reasonable (prefer `record`).
+- Constructor DI only; **no service locator**.
+- Async/await end-to-end; pass `CancellationToken` through.
+- Throw meaningful exceptions; don't swallow errors silently.
+
+---
+
+## 16) Testing (SHOULD)
+- **Unit tests**: Core handlers & domain logic.  
+  Use `Microsoft.Extensions.Time.Testing.FakeTimeProvider` to freeze time deterministically.
+- **Integration tests**: controllers + DI + auth pipeline.
+- Mock `ICurrentUser`/ports as needed.
+- Test happy-path and failure-path.
+
+---
+
+## 17) Troubleshooting (MUST)
+- **500 on `/swagger/v1/swagger.json`**:
+  - Likely **schema ID collision** for nested types → ensure `CustomSchemaIds` (see §7).
+  - Or missing DI registration (e.g., `TimeProvider`) used by handlers.
+  - If using assembly scanning, guard `Assembly.GetTypes()` against `ReflectionTypeLoadException` and register only loaded types; otherwise, do manual DI.
+- **401/403**:
+  - Verify `Auth:Oidc.Authority`, `Auth:Audience`, optional `Auth:Oidc.Issuer`, token lifetime, and `Auth:RoleClaimType`.
+- **JWT bearer package versions**:
+  - On .NET 8, install `Microsoft.AspNetCore.Authentication.JwtBearer` **8.x** (not 9.x).
+
+---
+
+## 18) Feature Recipe (Cursor must follow)
+1) **Core** → create `src/Core/Features/<Feature>/<Kind>/<Action>.cs` with:
+   - `record Query` **or** `record Command`
+   - `record Result`
+   - `sealed class Handler(...)` with `Task<Result> Handle(..., CancellationToken ct = default)`
+2) **Web** → add/update `src/Web/Controllers/<Feature>Controller.cs`:
+   - Inject handler via `[FromServices]`
+   - Return `ActionResult<Result>`
+   - Apply `[Authorize]` / `[Authorize(Roles="...")]` if needed
+3) **DI** → register handler(s) in `Program.cs` (manual or safe scan)
+4) **Swagger** → ensure `CustomSchemaIds` is present
+5) **Auth** → verify RBAC annotations if the endpoint requires roles
+6) **No new packages** unless explicitly requested
+
+---
+
+## 19) Example — Hello (Query & Command)
+
+**Core — Query**
+```csharp
+namespace SourceBackend.Core.Features.Hello.Queries;
+
+public static class GetHello
+{
+    public sealed record Query(string? Name);
+    public sealed record Result(string Message, DateTimeOffset UtcNow);
+
+    public sealed class Handler(TimeProvider clock)
+    {
+        public Task<Result> Handle(Query q, CancellationToken ct = default)
+        {
+            var name = string.IsNullOrWhiteSpace(q.Name) ? "world" : q.Name!.Trim();
+            return Task.FromResult(new Result($"Hello, {name}!", clock.GetUtcNow()));
+        }
+    }
+}
+```
+
+**Core — Command**
+```csharp
+namespace SourceBackend.Core.Features.Hello.Commands;
+
+public static class SendHello
+{
+    public sealed record Command(string? Name);
+    public sealed record Result(string Message, Guid OperationId, DateTimeOffset UtcNow);
+
+    public sealed class Handler(TimeProvider clock)
+    {
+        public Task<Result> Handle(Command c, CancellationToken ct = default)
+        {
+            var name = string.IsNullOrWhiteSpace(c.Name) ? "world" : c.Name!.Trim();
+            return Task.FromResult(new Result($"Hello, {name}!", Guid.NewGuid(), clock.GetUtcNow()));
+        }
+    }
+}
+```
+
+**Web — Controller**
+```csharp
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using SourceBackend.Core.Features.Hello.Queries;
+using SourceBackend.Core.Features.Hello.Commands;
+
+namespace SourceBackend.Web.Controllers;
+
+[ApiController]
+[Route("hello")]
+[AllowAnonymous]
+public sealed class HelloController : ControllerBase
+{
+    [HttpGet]
+    public async Task<ActionResult<GetHello.Result>> Get(
+        [FromServices] GetHello.Handler h,
+        [FromQuery] string? name,
+        CancellationToken ct)
+        => Ok(await h.Handle(new GetHello.Query(name), ct));
+
+    public sealed record PostHelloDto(string? Name);
+
+    [HttpPost]
+    public async Task<ActionResult<SendHello.Result>> Post(
+        [FromServices] SendHello.Handler h,
+        [FromBody] PostHelloDto dto,
+        CancellationToken ct)
+        => Created("/hello", await h.Handle(new SendHello.Command(dto?.Name), ct));
+}
+```
+
